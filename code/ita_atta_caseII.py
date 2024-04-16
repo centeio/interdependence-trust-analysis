@@ -44,18 +44,24 @@ class RobotTrustModel(torch.nn.Module):
     def __init__(self):
         super(RobotTrustModel, self).__init__()
 
+        # number of capabilities
+        self.n_cap = 2
+
+        # number of willigness
+        # n_will = 2
+
         #beta is not relevant for artificial trust model (see BTM paper for natural trust)
-        self.pre_beta_1 = Parameter(dtype(4.0 * np.ones(1)), requires_grad=True)
-        self.pre_beta_2 = Parameter(dtype(4.0 * np.ones(1)), requires_grad=True)
+        self.pre_beta = Parameter(dtype(4.0 * np.ones(self.n_cap)), requires_grad=True)
 
         #instead of using lower bounds of 0 and upper bounds of 1, the code is more
         #stable when using the range [-10,10] and then converting back later to [0,1].
         #requires_grad=True means it is part of the gradient computation (i.e., the value should be updated when being optimized)
-        self.pre_l_1 = Parameter(dtype(-10.0 * np.ones(1)), requires_grad=True)
-        self.pre_u_1 = Parameter(dtype( 10.0 * np.ones(1)), requires_grad=True)
-        self.pre_l_2 = Parameter(dtype(-10.0 * np.ones(1)), requires_grad=True)
-        self.pre_u_2 = Parameter(dtype( 10.0 * np.ones(1)), requires_grad=True)
+        self.pre_can_l = Parameter(dtype(-10.0 * np.ones(self.n_cap)), requires_grad=True)
+        self.pre_can_u = Parameter(dtype( 10.0 * np.ones(self.n_cap)), requires_grad=True)
 
+
+        # self.pre_will_l = Parameter(dtype(-10.0 * np.ones(1)), requires_grad=True)
+        # self.pre_will_u = Parameter(dtype( 10.0 * np.ones(1)), requires_grad=True)
 
 
     def forward(self, bin_centers, obs_probs_idxs):
@@ -63,6 +69,10 @@ class RobotTrustModel(torch.nn.Module):
         
         n_diffs = obs_probs_idxs.shape[0] #the number of [row,col] indexes (max is nbins x nbins (625))
         trust = torch.zeros(n_diffs) #create a 1xn_diffs array of 0s
+
+        for l in self.pre_can_l:
+            print("IN LOOP ",l)
+            exit()
 
         if(self.pre_l_1 > self.pre_u_1): #if the lower bound is greater than the upper bound
             buf = self.pre_l_1 #switch the l_1 and u_1 values
@@ -94,19 +104,33 @@ class RobotTrustModel(torch.nn.Module):
         
         return trust
 
-    def compute_trust(self, l, u, b, p):
+    def compute_trust(self, l_vec, u_vec, b_vec, p_vec, task):
         #passing in lower bound capability belief, upper bound capability belief, beta, task requirement lambdabar
 
-        if b < -50: #this is for natural trust. This never happens for the artificial trust model.
-            trust = 1.0 - 1.0 / (b * (u - l)) * torch.log( (1.0 + torch.exp(b * (p - l))) / (1.0 + torch.exp(b * (p - u))) )
-        
-        else: #as long as you pass in a positive beta, we will be calculating artificial trust which doesnt depend on beta
-            if p <= l: #if lambdabar is less than the lower bound capability belief
-                trust = torch.tensor([1.0],requires_grad=True) #assign a trust of 1
-            elif p > u: #if lambdabar is greater than the upper bound capability belief
-                trust = torch.tensor([0.0],requires_grad=True) #assign a trust of 0
-            else:
-                trust = (u - p) / (u - l + 0.0001) #assign trust as a constant slope between u and l. 0.0001 is to not divide by 0.
+        trust = 1
+
+        for i in range(self.n_cap):
+            l = l_vec[i]
+            u = u_vec[i]
+            b = b_vec[i]
+            p = p_vec[i][task]
+
+            if b < -50: #this is for natural trust. This never happens for the artificial trust model.
+                trust_temp = 1.0 - 1.0 / (b * (u - l)) * torch.log( (1.0 + torch.exp(b * (p - l))) / (1.0 + torch.exp(b * (p - u))) )
+                #print("trust temp 1: ", trust_temp)
+            
+            else: #as long as you pass in a positive beta, we will be calculating artificial trust which doesnt depend on beta
+                if p <= l: #if lambdabar is less than the lower bound capability belief
+                    trust_temp = torch.tensor([1.0],requires_grad=True) #assign a trust of 1
+                    #print("trust temp 2: ", trust_temp)
+                elif p > u: #if lambdabar is greater than the upper bound capability belief
+                    trust_temp = torch.tensor([0.0],requires_grad=True) #assign a trust of 0
+                    #print("trust temp 3: ", trust_temp)
+                else:
+                    trust_temp = (u - p) / (u - l + 0.0001) #assign trust as a constant slope between u and l. 0.0001 is to not divide by 0.
+                    #print("trust temp 4", trust_temp)
+
+            trust = trust * trust_temp
 
         if usecuda:
             trust = trust.cuda()
@@ -150,10 +174,9 @@ if __name__ == "__main__":
         t = 0
         report_period = 200 #how often to print the lower and upper bounds and loss to the screen
 
-        l_1 = [] #array for the progression of first capability dimension lower bound
-        u_1 = [] #array for the progression of the first capability dimension upper bound
-        l_2 = []
-        u_2 = []
+        l_prog = [] #array for the progression of capability dimension lower bound
+        u_prog = [] #array for the progression of capability dimension upper bound
+
         tt = [] #array from 0 to some number <= 2199, where the sequence repeats for the number of tasks
         loss_to_save = [] #the mean square error we are minimizing. New value is appended every time Adam is run or passed if loss already within tolerance    
         task_number = [] #the number of the task every time Adam is run or passed if loss is already within tolerance
@@ -189,16 +212,11 @@ if __name__ == "__main__":
         obs_probs_idxs = [] #the row and col pairs for which there is an observed trust approximation [[row col][row col]...]
         obs_probs_vect = [] #the trust approximation corresponding to the row and col pair in obs_probs_idxs
         p = [] #2 x num_tasks array to hold all task requirements
-        p1 = [] #1 x num_tasks array to hold lambdabar1 value (first row of p)
-        p2 = [] #1 x num_tasks array to hold lambdabar2 value (second row of p)
         perfs = [] #1 x num_tasks array to hold team successes or failures 
 
-        human_p1 = [] #array to hold the lambdabar1 requirements for tasks assigned to the human
-        human_p2 = [] #array to hold the lambdabar2 requirements for tasks assigned to the human
-        robot_p1 = [] #array to hold the lambdabar1 requirements for tasks assigned to the robot
-        robot_p2 = [] #array to hold the lambdabar2 requirements for tasks assigned to the robot
-        tie_p1 = [] #array to hold the lambdabar1 requirements for tasks that are a tie
-        tie_p2 = [] #array to hold the lambdabar2 requirements for tasks that are a tie
+        human_p = [] #array to hold the lambdabar1 requirements for tasks assigned to the human
+        robot_p = [] #array to hold the lambdabar1 requirements for tasks assigned to the robot
+        tie_p = [] #array to hold the lambdabar1 requirements for tasks that are a tie
         assigned = -1 #to indicate which agent the task is assigned to (-1 means no one yet, 0 means robot, 1 means human)
         human_trust = [] #array to hold trust in the human for every task
         robot_trust = [] #array to hold trust in the robot for every task
@@ -219,25 +237,28 @@ if __name__ == "__main__":
         max_total_reward = 0 #the max total reward if every task was a success
 
         #fabricated capability values for the human
-        human_l1 = 0.54
-        human_u1 = 0.56
-        human_l2 = 0.74
-        human_u2 = 0.76    
-        human_beta1 = 1000 #remember beta does not matter as long as it is positive
-        human_beta2 = human_beta1
+        #human_l1 = 0.54
+        #human_u1 = 0.56
+        #human_l2 = 0.74
+        #human_u2 = 0.76    
+        human_l = np.array([0.54,0.74])
+        human_u = np.array([0.56,0.76])
+
+        human_beta = np.array([1000,1000]) #remember beta does not matter as long as it is positive
 
         #fabricated capability values for the robot
-        robot_l1 = 0.69
-        robot_u1 = 0.71
-        robot_l2 = 0.39
-        robot_u2 = 0.41
-        robot_beta1 = model.pre_beta_1 * model.pre_beta_1 
-        robot_beta2 = model.pre_beta_2 * model.pre_beta_2 
+        #robot_l1 = 0.69
+        #robot_u1 = 0.71
+        #robot_l2 = 0.39
+        #robot_u2 = 0.41
+        robot_l = np.array([0.69,0.39])
+        robot_u = np.array([0.71,0.41])
+
+        robot_beta = model.pre_beta * model.pre_beta
         
         human_c1 = (human_l1 + human_u1)/2.0 #actual capabilities
         human_c2 = (human_l2 + human_u2)/2.0
-        robot_c1 = (robot_l1 + robot_u1)/2.0
-        robot_c2 = (robot_l2 + robot_u2)/2.0
+        robot_c = (robot_l + robot_u)/2.0
 
         load_file_name = "./results/tasks/TA_normaldist_tasks_" + str(iter) + ".mat"
         fixed_tasks_mat = sio.loadmat(load_file_name) #2x500 tasks
@@ -254,43 +275,31 @@ if __name__ == "__main__":
         #ATTA
         print("Running ATTA Iter " + str(iter))
         for i in range(num_tasks): #iterates from 0 to num_tasks-1 for a total of num_tasks times
-            
-            if(model.pre_l_1 > model.pre_u_1): #if the lower bound is greater than the upper bound
-                buf = model.pre_l_1 #switch the l_1 and u_1 values
-                model.pre_l_1 = model.pre_u_1
-                model.pre_u_1 = buf
-                print("l1 and u1 switched")
+            reward = 0
+            humanCost = 0
+            robotCost = 0
 
-            if(model.pre_l_2 > model.pre_u_2): #if the lower bound is greater than the upper bound
-                buf = model.pre_l_2 #switch the l_2 and u_2 values
-                model.pre_l_2 = model.pre_u_2
-                model.pre_u_2 = buf
-                print("l2 and u2 switched")
+            for j in range(model.n_cap):
+                #print("IN LOOP ",model.pre_can_l[j],model.pre_can_u[j])
+                if(model.pre_can_l[j] > model.pre_can_u[j]): #if the lower bound is greater than the upper bound
+                    buf = model.pre_l_1 #switch the l_1 and u_1 values
+                    model.pre_can_l[j] = model.pre_can_u[j]
+                    model.pre_can_u[j] = buf
+                    print("l and u switched in capability ", j)
 
-            #print("pre_l1 = ", model.pre_l_1)
-            #print("pre_u1 = ", model.pre_u_1)
-            #print("pre_l2 = ", model.pre_l_2)
-            #print("pre_u2 = ", model.pre_u_2)
+                l_sigm = model.sigm(model.pre_can_l) #convert to [0,1] range
+                u_sigm = model.sigm(model.pre_can_u)
+                beta = model.pre_beta * model.pre_beta #keep it positive       
 
-            l1 = model.sigm(model.pre_l_1) #convert to [0,1] range
-            u1 = model.sigm(model.pre_u_1)
-            beta_1 = model.pre_beta_1 * model.pre_beta_1 #want beta to be positive to calculate artificial trust
+                reward = reward + p[j][i]
+                humanCost = humanCost + p[j][i]
+                robotCost = robotCost + p[j][i]
 
-            l2 = model.sigm(model.pre_l_2)
-            u2 = model.sigm(model.pre_u_2)
-            beta_2 = model.pre_beta_2 * model.pre_beta_2
-
-            #print("l1 after sigm = ", l1)
-            #print("u1 after sigm = ", u1)
-            #print("l2 after sigm = ", l2)
-            #print("u2 after sigm = ", u2)
-            #print("beta 1 =", beta_1)
-            #print("beta_2 = ", beta_2)
 
             #compute trust in each agent now based on current belief in lower and upper bounds
-            humantrust_i = model.compute_trust(l1, u1, beta_1, p[0][i]) * model.compute_trust(l2, u2, beta_2, p[1][i])
-            robottrust_i = model.compute_trust(robot_l1, robot_u1, robot_beta1, p[0][i]) * model.compute_trust(robot_l2, robot_u2, robot_beta2, p[1][i])
-            
+            humantrust_i = model.compute_trust(l_sigm, u_sigm, beta, p, i)
+            robottrust_i = model.compute_trust(robot_l, robot_u, robot_beta, p, i)
+
             #append trust for this task to the arrays
             human_trust = np.append(human_trust, humantrust_i.item())
             robot_trust = np.append(robot_trust, robottrust_i.item())
@@ -303,13 +312,12 @@ if __name__ == "__main__":
             if usecuda:
                 humantrust_i = humantrust_i.cuda()
                 robottrust_i = robottrust_i.cuda()
-                
 
             #compute the task reward and costs now
-            reward = (p[0][i] + p[1][i])/(2.0) 
+            reward = reward/(2.0) 
 
-            humanCost = (p[0][i] + p[1][i])/(3.0)
-            robotCost = (p[0][i] + p[1][i])/(8.0)
+            humanCost = humanCost/(3.0)
+            robotCost = robotCost/(8.0)
 
             #compute expected total reward for each agent
             Ehuman = humantrust_i.item()*reward - humanCost
@@ -328,39 +336,36 @@ if __name__ == "__main__":
             #print("human_expected array = ", human_expected)
             #print("robot_expected array = ", robot_expected)
 
+            exit()
+
             #assign the task now
             assigned = -1 #to indicate the task is not assigned yet
             Ediff = abs(Ehuman - Erobot)
             alpha_tolerance = 0.0 #to help balance the distribution of tasks assigned to each agent
             if Ediff <= alpha_tolerance:
-                tie_p1 = np.append(tie_p1, p[0][i])
-                tie_p2 = np.append(tie_p2, p[1][i])
+                tie_p = np.append(tie_p, p[:][i])
                 tie_num_tasks = tie_num_tasks + 1 #the number of tasks that were initially tied
                 print("not assigned yet: tie")
 
                 if human_num_tasks <= robot_num_tasks: #if the human has fewer or equal tasks as the robot
-                    human_p1 = np.append(human_p1, p[0][i]) #append the task's lambdabar1 requirement
-                    human_p2 = np.append(human_p2, p[1][i]) #append the task's lambdabar2 requirement
+                    human_p = np.append(human_p, p[:][i]) #append the task's lambdabar1 requirement
                     assigned = 1
                     human_num_tasks = human_num_tasks + 1
                     print("within tolerance assigned to human")
                 else: #the robot has fewer tasks than the human
-                    robot_p1 = np.append(robot_p1, p[0][i]) 
-                    robot_p2 = np.append(robot_p2, p[1][i])
+                    robot_p = np.append(robot_p, p[:][i]) 
                     assigned = 0
                     robot_num_tasks = robot_num_tasks + 1
                     print("within tolerance assigned to robot")
             else:
                 if (Ehuman > Erobot):
-                    human_p1 = np.append(human_p1, p[0][i]) #append the task's lambdabar1 requirement
-                    human_p2 = np.append(human_p2, p[1][i]) #append the task's lambdabar2 requirement
+                    human_p = np.append(human_p, p[:][i]) #append the task's lambdabar1 requirement
                     assigned = 1 #to indicate the task is assigned to the human
                     human_num_tasks = human_num_tasks + 1
                     print("assigned to human")
                     
                 elif (Ehuman < Erobot):
-                    robot_p1 = np.append(robot_p1, p[0][i]) 
-                    robot_p2 = np.append(robot_p2, p[1][i])
+                    robot_p = np.append(robot_p, p[:][i]) 
                     assigned = 0 #to indicate the task is assigned to the robot
                     robot_num_tasks = robot_num_tasks + 1
                     print("assigned to robot")
@@ -368,13 +373,15 @@ if __name__ == "__main__":
                 #the case of Ehuman == Erobot is captured in Ediff <= alpha_tolerance above
 
             #observe the task outcome now
-            col_i = np.vstack(([p[0][i]],[p[1][i]])) #col for hstack
+            col_i = np.vstack([p[:][i]]) #col for hstack
             tester = random.random()
             perf_i = 0 #failure by default on the ith task
 
+            exit()
+
             #compute the true trust probability for each agent
-            human_outcome_prob = model.sigmoid(p[0][i], human_c1) * model.sigmoid(p[1][i], human_c2)
-            robot_outcome_prob = model.sigmoid(p[0][i], robot_c1) * model.sigmoid(p[1][i], robot_c2)
+            human_outcome_prob = model.sigmoid(p[:][i], human_c1) * model.sigmoid(p[1][i], human_c2)
+            robot_outcome_prob = model.sigmoid(p[:][i], robot_c1) * model.sigmoid(p[1][i], robot_c2)
 
 
             if assigned == 1: #if the task was assigned to the human
