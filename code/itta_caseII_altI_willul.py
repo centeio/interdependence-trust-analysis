@@ -59,6 +59,9 @@ class RobotTrustModel(torch.nn.Module):
         self.pre_can_l = Parameter(dtype(-10.0 * np.ones(self.n_cap)), requires_grad=True)
         self.pre_can_u = Parameter(dtype( 10.0 * np.ones(self.n_cap)), requires_grad=True)
 
+        self.pre_will_l = Parameter(dtype(-10 * np.ones(1)), requires_grad=True)
+        self.pre_will_u = Parameter(dtype(10 * np.ones(1)), requires_grad=True)
+
 
         # self.pre_will_l = Parameter(dtype(-10.0 * np.ones(1)), requires_grad=True)
         # self.pre_will_u = Parameter(dtype( 10.0 * np.ones(1)), requires_grad=True)
@@ -70,33 +73,26 @@ class RobotTrustModel(torch.nn.Module):
         n_diffs = obs_probs_idxs.shape[0] #the number of [row,col] indexes (max is nbins x nbins (625))
         trust = torch.zeros(n_diffs) #create a 1xn_diffs array of 0s
 
-        for l in self.pre_can_l:
-            print("IN LOOP ",l)
-            exit()
+        for j in range(model.n_cap):
+            if(self.pre_can_l[j] > self.pre_can_u[j]): #if the lower bound is greater than the upper bound
+                buf = self.pre_can_l[j] #switch the l_1 and u_1 values
+                self.pre_can_l[j] = self.pre_can_u[j]
+                self.pre_can_u[j] = buf
 
-        if(self.pre_l_1 > self.pre_u_1): #if the lower bound is greater than the upper bound
-            buf = self.pre_l_1 #switch the l_1 and u_1 values
-            self.pre_l_1 = self.pre_u_1
-            self.pre_u_1 = buf
+        #for w in range(model.n_will):
+        if(self.pre_will_l > self.pre_will_u): #if the lower bound is greater than the upper bound
+            buf = self.pre_will_l #switch the l_1 and u_1 values
+            self.pre_will_l = self.pre_will_u
+            self.pre_will_u = buf
 
-        if(self.pre_l_2 > self.pre_u_2): #if the lower bound is greater than the upper bound
-            buf = self.pre_l_2 #switch the l_2 and u_2 values
-            self.pre_l_2 = self.pre_u_2
-            self.pre_u_2 = buf
-
-        l_1 = self.sigm(self.pre_l_1) #convert to [0,1] range
-        u_1 = self.sigm(self.pre_u_1)
-        beta_1 = self.pre_beta_1 * self.pre_beta_1 #want beta to be positive to compute trust using the artificial trust model
-
-        l_2 = self.sigm(self.pre_l_2)
-        u_2 = self.sigm(self.pre_u_2)
-        beta_2 = self.pre_beta_2 * self.pre_beta_2
-
+        can_l = self.sigm(self.pre_can_l) #convert to [0,1] range
+        can_u = self.sigm(self.pre_can_u)
+        will_l = self.sigm(self.pre_will_l)
+        will_u = self.sigm(self.pre_will_u)
+        beta = self.pre_beta * self.pre_beta #want beta to be positive to compute trust using the artificial trust model
 
         for i in range(n_diffs): #loop over the number of the [row,col] indexes (max is nbins x nbins (625))
-            bin_center_idx_1 = obs_probs_idxs[i, 0] #get the ith cell row
-            bin_center_idx_2 = obs_probs_idxs[i, 1] #get the ith cell col
-            trust[i] = self.compute_trust(l_1, u_1, beta_1, bin_centers[bin_center_idx_1]) * self.compute_trust(l_2, u_2, beta_2, bin_centers[bin_center_idx_2])
+            trust[i] = self.compute_trust(can_l, can_u, will_l, will_u, beta, bin_centers[obs_probs_idxs[i]])
             #computing the trust estimate for each cell based on the current lower and upper bounds (basically the 3d trust plot)
 
         if usecuda:
@@ -104,33 +100,44 @@ class RobotTrustModel(torch.nn.Module):
         
         return trust
 
-    def compute_trust(self, l_vec, u_vec, b_vec, p_vec, task):
-        #passing in lower bound capability belief, upper bound capability belief, beta, task requirement lambdabar
+    def compute_trust(self, can_l_vec, can_u_vec, will_l, will_u, b_vec, p_vec):
+        #passing in lower bound capability belief, upper bound capability belief,  lower bound willingness belief, upper bound willingness belief, beta, probability
 
         trust = 1
 
+        # iterate over capabilities
         for i in range(self.n_cap):
-            l = l_vec[i]
-            u = u_vec[i]
+            can_l = can_l_vec[i]
+            can_u = can_u_vec[i]
             b = b_vec[i]
-            p = p_vec[i][task]
+            p = p_vec[i]
 
             if b < -50: #this is for natural trust. This never happens for the artificial trust model.
-                trust_temp = 1.0 - 1.0 / (b * (u - l)) * torch.log( (1.0 + torch.exp(b * (p - l))) / (1.0 + torch.exp(b * (p - u))) )
+                trust_temp = 1.0 - 1.0 / (b * (can_u - can_l)) * torch.log( (1.0 + torch.exp(b * (p - can_l))) / (1.0 + torch.exp(b * (p - can_u))) )
                 #print("trust temp 1: ", trust_temp)
             
             else: #as long as you pass in a positive beta, we will be calculating artificial trust which doesnt depend on beta
-                if p <= l: #if lambdabar is less than the lower bound capability belief
+                if p <= can_l: #if lambdabar is less than the lower bound capability belief
                     trust_temp = torch.tensor([1.0],requires_grad=True) #assign a trust of 1
-                    #print("trust temp 2: ", trust_temp)
-                elif p > u: #if lambdabar is greater than the upper bound capability belief
+                    #print("trust temp 2: ", trust_temp) 
+                elif p > can_u: #if lambdabar is greater than the upper bound capability belief
                     trust_temp = torch.tensor([0.0],requires_grad=True) #assign a trust of 0
                     #print("trust temp 3: ", trust_temp)
                 else:
-                    trust_temp = (u - p) / (u - l + 0.0001) #assign trust as a constant slope between u and l. 0.0001 is to not divide by 0.
+                    trust_temp = (can_u - p) / (can_u - can_l + 0.0001) #assign trust as a constant slope between u and l. 0.0001 is to not divide by 0.
                     #print("trust temp 4", trust_temp)
 
             trust = trust * trust_temp
+        
+        #will = (will_l - will_u) * torch.rand(1) + will_u # random number from normal distribution between the lower and upper bound
+        will = torch.div(will_l + will_u, 2.0)
+        #will = torch.div(will, 2)
+        #print("willingness aft", will)
+
+        # multiply by willigness factor
+        trust = trust * will
+
+        #print("TRUST with willingness", trust)
 
         if usecuda:
             trust = trust.cuda()
@@ -138,9 +145,9 @@ class RobotTrustModel(torch.nn.Module):
         return trust #returns the trust in human agent given lower bound l, upper bound u, beta term b, and task requirement lambdabar p 
 
     def sigm(self, x): #sigmoid function to convert [-10,10] (really [-inf,inf]) to [0,1]
-        return 1 / (1 + torch.exp(-x))
+        return torch.div(1,torch.add(1,torch.exp(-x)))
 
-    def sigmoid(self, lambdabar, agent_c):
+    def sigmoid(self, lambdabar, agent_vec):
         #takes in task requirement for one dimension and the agent's actual capability for that dimension
         #calculates true trust to determine the stochastic task outcome
 
@@ -148,7 +155,10 @@ class RobotTrustModel(torch.nn.Module):
         eta = 1/50.0 #is a good value through testing for good capability updating
         #eta = 1/5.0
         #eta = 1/500.0
-        return 1 / (1 + math.exp((lambdabar - agent_c)/eta))
+
+        size = len(agent_vec)
+
+        return np.ones(size) / (np.ones(size) + np.exp((lambdabar - agent_vec)/(np.ones(size)*eta)))
 
 
 
@@ -174,8 +184,12 @@ if __name__ == "__main__":
         t = 0
         report_period = 200 #how often to print the lower and upper bounds and loss to the screen
 
-        l_prog = [] #array for the progression of capability dimension lower bound
-        u_prog = [] #array for the progression of capability dimension upper bound
+        can_l_prog = [] #array for the progression of capability dimension lower bound
+        can_u_prog = [] #array for the progression of capability dimension upper bound
+
+        will_l_prog = [] #array for the progression of willingness lower bound        
+        will_u_prog = [] #array for the progression of willingness upper bound
+
 
         tt = [] #array from 0 to some number <= 2199, where the sequence repeats for the number of tasks
         loss_to_save = [] #the mean square error we are minimizing. New value is appended every time Adam is run or passed if loss already within tolerance    
@@ -241,8 +255,11 @@ if __name__ == "__main__":
         #human_u1 = 0.56
         #human_l2 = 0.74
         #human_u2 = 0.76    
-        human_l = np.array([0.54,0.74])
-        human_u = np.array([0.56,0.76])
+        human_can_l = np.array([0.54,0.74]) #size is n_cap
+        human_can_u = np.array([0.56,0.76])
+
+        human_will_l = 0.7
+        human_will_u = 0.9
 
         human_beta = np.array([1000,1000]) #remember beta does not matter as long as it is positive
 
@@ -251,21 +268,32 @@ if __name__ == "__main__":
         #robot_u1 = 0.71
         #robot_l2 = 0.39
         #robot_u2 = 0.41
-        robot_l = np.array([0.69,0.39])
-        robot_u = np.array([0.71,0.41])
+        robot_can_l = np.array([0.69,0.39])
+        robot_can_u = np.array([0.71,0.41])
+
+        robot_will_u = 1.0
+        robot_will_l = 1.0
 
         robot_beta = model.pre_beta * model.pre_beta
         
-        human_c1 = (human_l1 + human_u1)/2.0 #actual capabilities
-        human_c2 = (human_l2 + human_u2)/2.0
-        robot_c = (robot_l + robot_u)/2.0
+        human_c = (human_can_l + human_can_u)/2.0 #actual capabilities
+        human_w = (human_will_l + human_will_u)/2.0
+
+        robot_c = (robot_can_l + robot_can_u)/2.0
+        robot_w = (robot_will_l + robot_will_u)/2.0
+
+
+
+        #human_w = (human_will_l - human_will_u) * torch.rand(1) + human_will_u # for normal distribution
+        #human_w = (human_will_l + human_will_u)/2.0
+        #robot_w = (robot_will_l + robot_will_u)/2.0
 
         load_file_name = "./results/tasks/TA_normaldist_tasks_" + str(iter) + ".mat"
         fixed_tasks_mat = sio.loadmat(load_file_name) #2x500 tasks
         p_from_mat = fixed_tasks_mat["p"] #an array of 2x500 tasks
 
         #take the tasks for the number of tasks you want
-        p = p_from_mat[0:2,0:num_tasks] #take rows 0 to 1 (not including 2) and num_tasks cols from 0 to num_tasks-1
+        p = p_from_mat[0:model.n_cap, 0:num_tasks] #take rows 0 to 1 (not including 2) and num_tasks cols from 0 to num_tasks-1
 
         #print("p = ", p)
         #print("p[0][0] = ", p[0][0])
@@ -282,13 +310,12 @@ if __name__ == "__main__":
             for j in range(model.n_cap):
                 #print("IN LOOP ",model.pre_can_l[j],model.pre_can_u[j])
                 if(model.pre_can_l[j] > model.pre_can_u[j]): #if the lower bound is greater than the upper bound
-                    buf = model.pre_l_1 #switch the l_1 and u_1 values
+                    buf = model.pre_can_l[j] #switch the l_1 and u_1 values
                     model.pre_can_l[j] = model.pre_can_u[j]
                     model.pre_can_u[j] = buf
                     print("l and u switched in capability ", j)
 
-                l_sigm = model.sigm(model.pre_can_l) #convert to [0,1] range
-                u_sigm = model.sigm(model.pre_can_u)
+
                 beta = model.pre_beta * model.pre_beta #keep it positive       
 
                 reward = reward + p[j][i]
@@ -296,9 +323,20 @@ if __name__ == "__main__":
                 robotCost = robotCost + p[j][i]
 
 
+            if(model.pre_will_l > model.pre_will_u): #if the lower bound is greater than the upper bound
+                buf = model.pre_will_l #switch the l_1 and u_1 values
+                model.pre_will_l = model.pre_will_u
+                model.pre_will_u = buf
+                print("l and u switched in willingness")
+
+            can_l_sigm = model.sigm(model.pre_can_l) #convert to [0,1] range
+            can_u_sigm = model.sigm(model.pre_can_u)
+            will_l_sigm = model.sigm(model.pre_will_l)
+            will_u_sigm = model.sigm(model.pre_will_u)
+
             #compute trust in each agent now based on current belief in lower and upper bounds
-            humantrust_i = model.compute_trust(l_sigm, u_sigm, beta, p, i)
-            robottrust_i = model.compute_trust(robot_l, robot_u, robot_beta, p, i)
+            humantrust_i = model.compute_trust(can_l_vec = can_l_sigm, can_u_vec = can_u_sigm, will_l = will_l_sigm, will_u = will_u_sigm, b_vec = beta, p_vec = p[:,i])
+            robottrust_i = model.compute_trust(can_l_vec = robot_can_l, can_u_vec = robot_can_u, will_l = robot_will_l, will_u = robot_will_u, b_vec = robot_beta, p_vec = p[:,i])
 
             #append trust for this task to the arrays
             human_trust = np.append(human_trust, humantrust_i.item())
@@ -336,36 +374,34 @@ if __name__ == "__main__":
             #print("human_expected array = ", human_expected)
             #print("robot_expected array = ", robot_expected)
 
-            exit()
-
             #assign the task now
             assigned = -1 #to indicate the task is not assigned yet
             Ediff = abs(Ehuman - Erobot)
-            alpha_tolerance = 0.0 #to help balance the distribution of tasks assigned to each agent
+            alpha_tolerance = 1 #to help balance the distribution of tasks assigned to each agent
             if Ediff <= alpha_tolerance:
-                tie_p = np.append(tie_p, p[:][i])
+                tie_p = np.append(tie_p, p[:,i])
                 tie_num_tasks = tie_num_tasks + 1 #the number of tasks that were initially tied
                 print("not assigned yet: tie")
 
                 if human_num_tasks <= robot_num_tasks: #if the human has fewer or equal tasks as the robot
-                    human_p = np.append(human_p, p[:][i]) #append the task's lambdabar1 requirement
+                    human_p = np.append(human_p, p[:,i]) #append the task's lambdabar1 requirement
                     assigned = 1
                     human_num_tasks = human_num_tasks + 1
                     print("within tolerance assigned to human")
                 else: #the robot has fewer tasks than the human
-                    robot_p = np.append(robot_p, p[:][i]) 
+                    robot_p = np.append(robot_p, p[:,i]) 
                     assigned = 0
                     robot_num_tasks = robot_num_tasks + 1
                     print("within tolerance assigned to robot")
             else:
                 if (Ehuman > Erobot):
-                    human_p = np.append(human_p, p[:][i]) #append the task's lambdabar1 requirement
+                    human_p = np.append(human_p, p[:,i]) #append the task's lambdabar1 requirement
                     assigned = 1 #to indicate the task is assigned to the human
                     human_num_tasks = human_num_tasks + 1
                     print("assigned to human")
                     
                 elif (Ehuman < Erobot):
-                    robot_p = np.append(robot_p, p[:][i]) 
+                    robot_p = np.append(robot_p, p[:,i]) 
                     assigned = 0 #to indicate the task is assigned to the robot
                     robot_num_tasks = robot_num_tasks + 1
                     print("assigned to robot")
@@ -373,16 +409,15 @@ if __name__ == "__main__":
                 #the case of Ehuman == Erobot is captured in Ediff <= alpha_tolerance above
 
             #observe the task outcome now
-            col_i = np.vstack([p[:][i]]) #col for hstack
+            col_i = np.vstack(p[:,i]) #col for hstack
             tester = random.random()
             perf_i = 0 #failure by default on the ith task
 
-            exit()
-
             #compute the true trust probability for each agent
-            human_outcome_prob = model.sigmoid(p[:][i], human_c1) * model.sigmoid(p[1][i], human_c2)
-            robot_outcome_prob = model.sigmoid(p[:][i], robot_c1) * model.sigmoid(p[1][i], robot_c2)
+            human_outcome_prob = np.prod(model.sigmoid(p[:,i], human_c)) * human_w
+            robot_outcome_prob = np.prod(model.sigmoid(p[:,i], robot_c)) * robot_w
 
+            print(human_outcome_prob)
 
             if assigned == 1: #if the task was assigned to the human
 
@@ -469,14 +504,15 @@ if __name__ == "__main__":
 
                     task_number += [i]
 
-                    l1 = model.sigm(model.pre_l_1) #convert back to correct range [0,1]
-                    u1 = model.sigm(model.pre_u_1)
-                    l2 = model.sigm(model.pre_l_2)
-                    u2 = model.sigm(model.pre_u_2)
-                    l_1 += [l1.item()] #get the value out of the tensor and add to the l_1 progression vector
-                    u_1 += [u1.item()]
-                    l_2 += [l2.item()]
-                    u_2 += [u2.item()]
+                    can_l = model.sigm(model.pre_can_l) #convert back to correct range [0,1]
+                    can_u = model.sigm(model.pre_can_u)
+                    can_l_prog += [can_l.detach().numpy()] #get the value out of the tensor and add to the l_1 progression vector
+                    can_u_prog += [can_u.detach().numpy()]
+
+                    will_l = model.sigm(model.pre_will_l)
+                    will_u = model.sigm(model.pre_will_u)
+                    will_l_prog += [will_l.detach().numpy()]
+                    will_u_prog += [will_u.detach().numpy()]
 
                     tt += [0]
                     counter = np.append(counter, t_count)
@@ -547,21 +583,21 @@ if __name__ == "__main__":
                         optimizer.step(closure) #optimizer calculates the gradient and adjusts the parameters that will minimize the loss function
                         #running the optimizer to update the parameters below
 
-                        l1 = model.sigm(model.pre_l_1) #convert back to correct range [0,1]
-                        u1 = model.sigm(model.pre_u_1)
-                        l2 = model.sigm(model.pre_l_2)
-                        u2 = model.sigm(model.pre_u_2)
-                        ll = torch.mean( torch.pow( (model(bin_c, obs_probs_idxs) - obs_probs_vect), 2.0 ) )
 
                         #model(bin_c,obs_probs_idxs) calls the model's forward function
                         #for each bin, it is the trust value as given by the model
                         #find the mean square error after subtracting the obs probabilities
+                        ll = torch.mean( torch.pow( (model(bin_c, obs_probs_idxs) - obs_probs_vect), 2.0 ) )
 
+                        can_l = model.sigm(model.pre_can_l) #convert back to correct range [0,1]
+                        can_u = model.sigm(model.pre_can_u)
+                        can_l_prog += [can_l.detach().numpy()] #get the value out of the tensor and add to the l_1 progression vector
+                        can_u_prog += [can_u.detach().numpy()]
 
-                        l_1 += [l1.item()] #get the value out of the tensor and add to the l_1 progression vector
-                        u_1 += [u1.item()]
-                        l_2 += [l2.item()]
-                        u_2 += [u2.item()]
+                        will_l = model.sigm(model.pre_will_l)
+                        will_u = model.sigm(model.pre_will_u)
+                        will_l_prog += [will_l.detach().numpy()]
+                        will_u_prog += [will_u.detach().numpy()]
 
                         tt += [t]
                         counter = np.append(counter, t_count)
@@ -577,11 +613,11 @@ if __name__ == "__main__":
 
                             print("counter = ", counter[-1])
 
-                            print("l_1 =", l_1[-1]) #print the last l_1 value
-                            print("u_1 =", u_1[-1]) #print the last u_1 value
+                            print("can_l =", can_l) #print the last l value
+                            print("can_u =", can_u) #print the last u value
+                            print("will_l =", will_l) #print the last l value
+                            print("will_u =", will_u) #print the last l value
 
-                            print("l_2 =", l_2[-1]) #print the last l_2 value
-                            print("u_2 =", u_2[-1]) #print the last u_2 value
 
                             print("loss", loss_to_save[-1]) #print the last loss_to_save value
                             
@@ -597,11 +633,10 @@ if __name__ == "__main__":
 
                             print("counter = ", counter[-1])
 
-                            print("l_1 =", l_1[-1]) #print the last l_1 value
-                            print("u_1 =", u_1[-1]) #print the last u_1 value
-
-                            print("l_2 =", l_2[-1]) #print the last l_2 value
-                            print("u_2 =", u_2[-1]) #print the last u_2 value
+                            print("can_l =", can_l) #print the last l value
+                            print("can_u =", can_u) #print the last u value
+                            print("will_l =", will_l) #print the last l value
+                            print("will_u =", will_u) #print the last l value
 
                             print("loss", loss_to_save[-1]) #print the last loss_to_save value
                             
@@ -626,6 +661,6 @@ if __name__ == "__main__":
                         t = t + 1 #increment t
 
 
-        res_dict = {"l_1": l_1, "u_1": u_1, "l_2": l_2, "u_2": u_2, "tt": tt, "counter": counter, "loss": loss_to_save, "task_number_stopping_early": task_number_stopping_early, "human_p1": human_p1, "human_p2": human_p2, "robot_p1": robot_p1, "robot_p2": robot_p2, "human_perfs": human_perfs, "robot_perfs": robot_perfs, "human_successes": human_successes, "human_failures": human_failures, "robot_successes": robot_successes, "robot_failures": robot_failures, "human_num_tasks": human_num_tasks, "robot_num_tasks": robot_num_tasks, "tie_num_tasks": tie_num_tasks, "total_num_tasks": total_num_tasks[0][0], "human_trust": human_trust, "robot_trust": robot_trust, "human_expected": human_expected, "robot_expected": robot_expected, "p": p, "perfs": perfs, "task_number": task_number, "obs_probs": obs_probs, "total_succeses": total_successes , "total_obs": total_obs, "human_l1": human_l1, "human_u1": human_u1, "human_l2": human_l2, "human_u2": human_u2, "robot_l1": robot_l1, "robot_u1": robot_u1, "robot_l2": robot_l2, "robot_u2": robot_u2, "total_reward": total_reward, "max_total_reward": max_total_reward}
-        res_mat_file_name = "results/atta/atta_caseII_eta50_" + str(iter) + ".mat"
+        res_dict = {"can_l": can_l, "can_u": can_u, "will_l": will_l, "will_u": will_u, "tt": tt, "counter": counter, "loss": loss_to_save, "task_number_stopping_early": task_number_stopping_early, "human_p": human_p, "robot_p": robot_p, "human_perfs": human_perfs, "robot_perfs": robot_perfs, "human_successes": human_successes, "human_failures": human_failures, "robot_successes": robot_successes, "robot_failures": robot_failures, "human_num_tasks": human_num_tasks, "robot_num_tasks": robot_num_tasks, "tie_num_tasks": tie_num_tasks, "total_num_tasks": total_num_tasks[0][0], "human_trust": human_trust, "robot_trust": robot_trust, "human_expected": human_expected, "robot_expected": robot_expected, "p": p, "perfs": perfs, "task_number": task_number, "obs_probs": obs_probs, "total_succeses": total_successes , "total_obs": total_obs, "human_can_l": human_can_l, "human_can_u": human_can_u, "robot_can_l": robot_can_l, "robot_can_u": robot_can_u, "total_reward": total_reward, "max_total_reward": max_total_reward}
+        res_mat_file_name = "results/carolina/itta_atta_caseII_eta50_" + str(iter) + ".mat"
         sio.savemat(res_mat_file_name, res_dict) #save to file   
