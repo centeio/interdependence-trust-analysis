@@ -171,7 +171,7 @@ if __name__ == "__main__":
         counter = [] #giant linspace array [0,1,2,...] for every time Adam is run in total or passed because loss is already within tolerance
 
         
-        nbins = 25
+        nbins = 10
         bin_lims = np.linspace(1/nbins, 1.0, nbins) #creates a 1 x nbins array of evenly spaced values from 1/nbins to 1.0
         bin_lims_ = dtype(np.concatenate([[0],bin_lims])) #inserts 0 to the start of the array
 
@@ -552,8 +552,8 @@ if __name__ == "__main__":
 
                             print("counter = ", counter[-1])
 
-                            print("l =", l[-1]) #print the last l value
-                            print("u =", u[-1]) #print the last u value
+                            print("l =", l) #print the last l value
+                            print("u =", u) #print the last u value
 
                             print("loss", loss_to_save[-1]) #print the last loss_to_save value
                             
@@ -569,8 +569,8 @@ if __name__ == "__main__":
 
                             print("counter = ", counter[-1])
 
-                            print("l =", l[-1]) #print the last l_1 value
-                            print("u =", u[-1]) #print the last u_1 value
+                            print("l =", l) #print the last l_1 value
+                            print("u =", u) #print the last u_1 value
 
                             print("loss", loss_to_save[-1]) #print the last loss_to_save value
                             

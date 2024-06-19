@@ -38,7 +38,6 @@ if usecuda: #if the the drivers needed for a GPU are available (from checking ab
 np.seterr(divide='ignore', invalid='ignore') #to not give warnings/errors when dividing by 0 or NaN
 
 
-
 class RobotTrustModel(torch.nn.Module):
 
     def __init__(self):
@@ -56,26 +55,26 @@ class RobotTrustModel(torch.nn.Module):
         #instead of using lower bounds of 0 and upper bounds of 1, the code is more
         #stable when using the range [-10,10] and then converting back later to [0,1].
         #requires_grad=True means it is part of the gradient computation (i.e., the value should be updated when being optimized)
-        self.pre_can_l = Parameter(dtype(-10.0 * np.ones(self.n_cap)), requires_grad=True)
-        self.pre_can_u = Parameter(dtype( 10.0 * np.ones(self.n_cap)), requires_grad=True)
+        self.pre_can_l = Parameter(dtype(-10 * np.ones(self.n_cap)), requires_grad=True)
+        self.pre_can_u = Parameter(dtype(10 * np.ones(self.n_cap)), requires_grad=True)
 
-        self.pre_will = Parameter(dtype(0.1 * np.ones(1)), requires_grad=True)
+        self.pre_will = Parameter(dtype(10 * np.ones(1)), requires_grad=False)
 
         # self.pre_will_l = Parameter(dtype(-10.0 * np.ones(1)), requires_grad=True)
         # self.pre_will_u = Parameter(dtype( 10.0 * np.ones(1)), requires_grad=True)
 
 
-    def forward(self, bin_centers, obs_probs_idxs):
+    def forward(self, nbins, obs_probs_idxs):
         #bin_centers and obs_probs_idxs are passed in
         
-        n_diffs = obs_probs_idxs.shape[0] #the number of [row,col] indexes (max is nbins x nbins (625))
-        trust = torch.zeros(n_diffs) #create a 1xn_diffs array of 0s
+        #n_diffs = len(obs_probs_idxs) #the number of [row,col] indexes (max is nbins x nbins (625))
+        trust = torch.zeros(len(obs_probs_idxs)) #create a 1xn_diffs array of 0s
 
         for j in range(model.n_cap):
             if(self.pre_can_l[j] > self.pre_can_u[j]): #if the lower bound is greater than the upper bound
                 buf = self.pre_can_l[j] #switch the l_1 and u_1 values
-                self.pre_can_l[j] = self.pre_can_u[j]
-                self.pre_can_u[j] = buf
+                self.pre_can_l[j].data = self.pre_can_u[j]
+                self.pre_can_u[j].data = buf
 
         #for w in range(model.n_will):
         #if(self.pre_will_l > self.pre_will_u): #if the lower bound is greater than the upper bound
@@ -85,11 +84,15 @@ class RobotTrustModel(torch.nn.Module):
 
         can_l = self.sigm(self.pre_can_l) #convert to [0,1] range
         can_u = self.sigm(self.pre_can_u)
-        will = self.sigm(self.pre_will)
+        will = torch.round(self.sigm(self.pre_will) * (w_bins)) / (w_bins)
         beta = self.pre_beta * self.pre_beta #want beta to be positive to compute trust using the artificial trust model
 
-        for i in range(n_diffs): #loop over the number of the [row,col] indexes (max is nbins x nbins (625))
-            trust[i] = self.compute_trust(can_l, can_u, will, beta, bin_centers[obs_probs_idxs[i]])
+        i = 0
+        for prob_idx_temp in obs_probs_idxs: #loop over the number of the [row,col] indexes (max is nbins x nbins (625))
+            # TODO may be optimized
+            prob_idxs_vec = np.array(list(prob_idx_temp))
+            trust[i] = self.compute_trust(can_l, can_u, will, beta, (prob_idxs_vec+0.5)*(1/nbins))
+            i += 1
             #computing the trust estimate for each cell based on the current lower and upper bounds (basically the 3d trust plot)
 
         if usecuda:
@@ -109,7 +112,10 @@ class RobotTrustModel(torch.nn.Module):
             b = b_vec[i]
             p = p_vec[i]
 
+            
             if b < -50: #this is for natural trust. This never happens for the artificial trust model.
+                #TODO add will to log calculation
+                print("beta", b)
                 trust_temp = 1.0 - 1.0 / (b * (can_u - can_l)) * torch.log( (1.0 + torch.exp(b * (p - can_l))) / (1.0 + torch.exp(b * (p - can_u))) )
                 #print("trust temp 1: ", trust_temp)
             
@@ -194,14 +200,14 @@ if __name__ == "__main__":
         counter = [] #giant linspace array [0,1,2,...] for every time Adam is run in total or passed because loss is already within tolerance
 
         
-        nbins = 10
-        bin_lims = np.linspace(1/nbins, 1.0, nbins) #creates a 1 x nbins array of evenly spaced values from 1/nbins to 1.0
-        bin_lims_ = dtype(np.concatenate([[0],bin_lims])) #inserts 0 to the start of the array
+        nbins = 25 # in ATTA paper it is 25
+        #bin_lims = np.linspace(1/nbins, 1.0, nbins) #creates a 1 x nbins array of evenly spaced values from 1/nbins to 1.0
+        #bin_lims_ = dtype(np.concatenate([[0],bin_lims])) #inserts 0 to the start of the array
 
-        bin_c = np.zeros(nbins)
-        for i in range(nbins):
-            bin_c[i] = (bin_lims_[i] + bin_lims_[i+1])/2.0
-        bin_c = dtype(bin_c) #convert to right data type
+        #bin_c = np.zeros(nbins)
+        #for i in range(nbins):
+        #    bin_c[i] = (bin_lims_[i] + bin_lims_[i+1])/2.0
+        #bin_c = dtype(bin_c) #convert to right data type
         #bin_c = [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95] #bin centers array example for nbins = 10
         
         #print(bin_lims_) #to check before proceeding
@@ -213,12 +219,13 @@ if __name__ == "__main__":
 
         total_obs = np.zeros((nbins, nbins)) #creates nbins x nbins array of 0s for holding the number of tasks that fall into each cell
         total_successes = np.zeros((nbins, nbins)) #creates nbins x nbins array of 0s for the number of human successes in each cell
+        obs_probs = np.zeros((nbins, nbins)) #creates nbins x nbins array of 0s for the number of human success probability in each cell
 
 
         num_tasks = 500 #Max = 500 based on .mat file. Change to the number of tasks you want to allocate.
 
         total_num_tasks = [[num_tasks]]
-        obs_probs_idxs = [] #the row and col pairs for which there is an observed trust approximation [[row col][row col]...]
+        obs_probs_idxs = set() # set of the row and col pairs for which there is an observed trust approximation [[row col][row col]...]
         obs_probs_vect = [] #the trust approximation corresponding to the row and col pair in obs_probs_idxs
         p = [] #2 x num_tasks array to hold all task requirements
         perfs = [] #1 x num_tasks array to hold team successes or failures 
@@ -245,6 +252,8 @@ if __name__ == "__main__":
         total_reward = 0 #the total reward for this task
         max_total_reward = 0 #the max total reward if every task was a success
 
+        w_bins = 5
+
         #fabricated capability values for the human
         #human_l1 = 0.54
         #human_u1 = 0.56
@@ -253,7 +262,7 @@ if __name__ == "__main__":
         human_can_l = np.array([0.54,0.74]) #size is n_cap
         human_can_u = np.array([0.56,0.76])
 
-        human_w = 0.8
+        human_w = 1        
 
         human_beta = np.array([1000,1000]) #remember beta does not matter as long as it is positive
 
@@ -287,6 +296,7 @@ if __name__ == "__main__":
         #print("p[0][0] = ", p[0][0])
         #print("p[1][0] = ", p[1][0])
 
+        human_w = round(human_w * w_bins) / w_bins # categorize in w_bins
 
         #ATTA
         print("Running ATTA Iter " + str(iter))
@@ -299,8 +309,8 @@ if __name__ == "__main__":
                 #print("IN LOOP ",model.pre_can_l[j],model.pre_can_u[j])
                 if(model.pre_can_l[j] > model.pre_can_u[j]): #if the lower bound is greater than the upper bound
                     buf = model.pre_can_l[j] #switch the l_1 and u_1 values
-                    model.pre_can_l[j] = model.pre_can_u[j]
-                    model.pre_can_u[j] = buf
+                    model.pre_can_l[j].data = model.pre_can_u[j]
+                    model.pre_can_u[j].data = buf
                     print("l and u switched in capability ", j)
 
 
@@ -312,7 +322,7 @@ if __name__ == "__main__":
 
             can_l_sigm = model.sigm(model.pre_can_l) #convert to [0,1] range
             can_u_sigm = model.sigm(model.pre_can_u)
-            will_sigm = model.sigm(model.pre_will)
+            will_sigm = torch.round(model.sigm(model.pre_will) * (w_bins)) / w_bins # putting willingness value in a bin
 
             #compute trust in each agent now based on current belief in lower and upper bounds
             humantrust_i = model.compute_trust(can_l_vec = can_l_sigm, can_u_vec = can_u_sigm, will = will_sigm, b_vec = beta, p_vec = p[:,i])
@@ -358,7 +368,7 @@ if __name__ == "__main__":
             assigned = -1 #to indicate the task is not assigned yet
             Ediff = abs(Ehuman - Erobot)
             #print("edif", Ediff)
-            alpha_tolerance = 0.8 #to help balance the distribution of tasks assigned to each agent
+            alpha_tolerance = 1 #to help balance the distribution of tasks assigned to each agent
             if Ediff <= alpha_tolerance:
                 tie_p = np.append(tie_p, p[:,i])
                 tie_num_tasks = tie_num_tasks + 1 #the number of tasks that were initially tied
@@ -442,43 +452,39 @@ if __name__ == "__main__":
 
             #update the nbins x nbins grid now for approximated trust
             if assigned == 1: #if the task was assigned to the human
-                for j in range(nbins): #iterate from 1 to nbins (nbins times) as the rows
-                    for k in range(nbins): #iterate from 1 to nbins (nbins times) as the columns
-                        if p[0][i] > bin_lims_[j] and p[0][i] <= bin_lims_[j+1]: #if ith task lambdabar1 requirement falls within j and j+1 th bin_lims_
-                            if p[1][i] > bin_lims_[k] and p[1][i] <= bin_lims_[k+1]: #if the ith task lambdabar2 requirement falls within k and k+1 th bin_lims_
-                                total_obs[j][k] = total_obs[j][k] + 1 #you have found the cell the task falls in so increase the number of observations for that cell
-                                if perfs[i] == 1: #if the ith task was a success
-                                    total_successes[j][k] = total_successes[j][k] + 1 #increase the number of successes for that cell
+                #for cap in range(n_cap): TODO adapt to more capabilities
 
-            obs_probs = np.divide(total_successes, total_obs) #divide the # of successes in each cell by the # of observations
+                j1 = round(p[0][i] * (nbins - 1))
+                k1 = round(p[1][i] * (nbins - 1))
 
+                # add indices to set of populated cells in trust matrix
+                indices_tupple = (j1, k1)
 
+                obs_probs_idxs.add(indices_tupple)
 
-            #update the human's lower and upper bounds now
-            if assigned == 1: #if the task was assigned to the human
-                obs_probs_idxs = []
-                for j in range(obs_probs.shape[0]): #loop over the rows = nbins
-                    for k in range(obs_probs.shape[1]): #loop over the columns = nbins
-                        if np.isnan(obs_probs[j, k]) == False: #check to see if it is NaN (can happen if 0 tasks are executed in that cell)
-                            obs_probs_idxs += [[j, k]] #add the [row,col] as a valid index in which we have a trust estimate (tau hat)
+                indices_list = list(indices_tupple)
 
-                obs_probs_idxs = np.array(obs_probs_idxs) #convert the valid indexes to a numpy array. it is now an array of 1x2 arrays [[x x][x x]...]
+                #increment total observation matrix
+                total_obs[indices_list] = total_obs[indices_list] + 1 #you have found the cell the task falls in so increase the number of observations for that cell
+                if perfs[i] == 1: #if the ith task was a success
+                    total_successes[indices_list] = total_successes[indices_list] + 1 #increase the number of successes for that cell
 
-
+                #update probabilities
+                obs_probs[indices_list] = total_successes[indices_list] / total_obs[indices_list] #divide the # of successes in each cell by the # of observations
                 obs_probs_vect = []
-                for j in range(obs_probs_idxs.shape[0]): #loop over the number of [row,col] indexes (max is nbins x nbins (625))
-                    obs_probs_vect += [obs_probs[obs_probs_idxs[j, 0], obs_probs_idxs[j, 1]]]
+                for prob_id in obs_probs_idxs: #loop over the number of [row,col] indexes (max is nbins x nbins (625))
+                    obs_probs_vect += [obs_probs[prob_id]]
                     #obs_probs_idxs[j,0] is the j th [row,col] row value and obs_probs_idxs[j,1] is the col value
                     #get the observed probability of each cell and store it in obs_probs_vect which is an array of values [x,x,...]
 
-                obs_probs = dtype(obs_probs) #convert to the right data type
+                #obs_probs = dtype(obs_probs) #convert to the right data type
                 obs_probs_vect = dtype(obs_probs_vect) #convert to the right data type
 
 
                 #compute current loss and see if it is less than the loss tolerance.
                 #if it is, no need to run the optimizer.
                 #else, run the optimizer.
-                ll = torch.mean( torch.pow( (model(bin_c, obs_probs_idxs) - obs_probs_vect), 2.0 ) ) #current loss
+                ll = torch.mean( torch.pow( (model(nbins, obs_probs_idxs) - obs_probs_vect), 2.0 ) ) #current loss
                 if ll.item() < loss_tolerance: #.item is just the way to extract the value from a torch tensor
                     print("loss is already below tolerance. Not running optimizer.")
                     task_number_stopping_early += [i]
@@ -490,7 +496,7 @@ if __name__ == "__main__":
                     can_l_prog += [can_l.detach().numpy()] #get the value out of the tensor and add to the l_1 progression vector
                     can_u_prog += [can_u.detach().numpy()]
 
-                    will = model.sigm(model.pre_will)
+                    will = torch.round(model.sigm(model.pre_will) * (w_bins)) / w_bins
                     will_prog += [will.detach().numpy()]
 
                     tt += [0]
@@ -533,7 +539,7 @@ if __name__ == "__main__":
                             #diff1 = model(bin_c, obs_probs_idxs)
                             
                             #diff = torch.tensor(model(bin_c, obs_probs_idxs) - obs_probs_vect, requires_grad=True)
-                            diff = model(bin_c, obs_probs_idxs) - obs_probs_vect #the diff between trust estimated from artificial trust model and trust approximation
+                            diff = model(nbins, obs_probs_idxs) - obs_probs_vect #the diff between trust estimated from artificial trust model and trust approximation
                             #print("model diff = ", diff1)
                             #print("obs_probs_vect = ", obs_probs_vect)
                             #print("diff = ", diff)
@@ -566,7 +572,7 @@ if __name__ == "__main__":
                         #model(bin_c,obs_probs_idxs) calls the model's forward function
                         #for each bin, it is the trust value as given by the model
                         #find the mean square error after subtracting the obs probabilities
-                        ll = torch.mean( torch.pow( (model(bin_c, obs_probs_idxs) - obs_probs_vect), 2.0 ) )
+                        ll = torch.mean( torch.pow( (model(nbins, obs_probs_idxs) - obs_probs_vect), 2.0 ) )
 
 
                         can_l = model.sigm(model.pre_can_l) #convert back to correct range [0,1]
@@ -574,7 +580,7 @@ if __name__ == "__main__":
                         can_l_prog += [can_l.detach().numpy()] #get the value out of the tensor and add to the l_1 progression vector
                         can_u_prog += [can_u.detach().numpy()]
 
-                        will = model.sigm(model.pre_will) #convert back to correct range [0,1]
+                        will = torch.round(model.sigm(model.pre_will) * (w_bins)) / (w_bins) #convert back to correct range [0,1]
                         will_prog += [will.detach().numpy()] #get the value out of the tensor and add to the l_1 progression vector
 
                         tt += [t]
@@ -593,7 +599,7 @@ if __name__ == "__main__":
 
                             print("can_l =", can_l) #print the last l value
                             print("can_u =", can_u) #print the last u value
-                            print("will =", will) #print the last l value
+                            print("will =", will, model.pre_will, model.sigm(model.pre_will)) #print the last l value
 
                             print("loss", loss_to_save[-1]) #print the last loss_to_save value
                             
@@ -611,7 +617,7 @@ if __name__ == "__main__":
 
                             print("can_l =", can_l) #print the last l value
                             print("can_u =", can_u) #print the last u value
-                            print("will =", will) #print the last l value
+                            print("will =", will, model.pre_will, model.sigm(model.pre_will)) #print the last l value
 
                             print("loss", loss_to_save[-1]) #print the last loss_to_save value
                             
@@ -622,14 +628,14 @@ if __name__ == "__main__":
                                 loss_200_iters_ago = current_loss
                                 current_loss = loss_to_save[-1]
 
-                        if abs(current_loss - loss_200_iters_ago) < 0.00000001: #the loss is not decreasing, no point in running optimizer anymore
-                            print("loss is not decreasing. Not running optimizer.")
+                        #if abs(current_loss - loss_200_iters_ago) < 0.00000001: #the loss is not decreasing, no point in running optimizer anymore
+                        #    print("loss is not decreasing. Not running optimizer.")
                             #time.sleep(3) #sleep for 3 seconds so I can verify the output in the terminal
 
-                            task_number_stopping_early += [i]
+                        #    task_number_stopping_early += [i]
 
-                            t_count = t_count + 1
-                            break
+                        #    t_count = t_count + 1
+                        #    break
                             
 
                         t_count = t_count + 1
