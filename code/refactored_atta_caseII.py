@@ -64,8 +64,8 @@ class RobotTrustModel(torch.nn.Module):
         # self.pre_will_u = Parameter(dtype( 10.0 * np.ones(1)), requires_grad=True)
 
 
-    def forward(self, n_bins, obs_probs_idxs):
-        #bin_centers and obs_probs_idxs are passed in
+    def forward(self, obs_probs_idxs):
+        #obs_probs_idxs are passed in
         
         #n_diffs = obs_probs_idxs.shape[0] #the number of [row,col] indexes (max is nbins x nbins (625))
         trust = torch.zeros(len(obs_probs_idxs)) #create a 1xn_diffs array of 0s
@@ -73,8 +73,8 @@ class RobotTrustModel(torch.nn.Module):
         for j in range(model.n_cap):
             if(self.pre_can_l[j] > self.pre_can_u[j]): #if the lower bound is greater than the upper bound
                 buf = self.pre_can_l[j] #switch the l_1 and u_1 values
-                self.pre_can_l[j] = self.pre_can_u[j]
-                self.pre_can_u[j] = buf
+                self.pre_can_l[j].data = self.pre_can_u[j]
+                self.pre_can_u[j].data = buf
 
         l = self.sigm(self.pre_can_l) #convert to [0,1] range
         u = self.sigm(self.pre_can_u)
@@ -176,21 +176,6 @@ if __name__ == "__main__":
 
         
         nbins = 10
-        bin_lims = np.linspace(1/nbins, 1.0, nbins) #creates a 1 x nbins array of evenly spaced values from 1/nbins to 1.0
-        bin_lims_ = dtype(np.concatenate([[0],bin_lims])) #inserts 0 to the start of the array
-
-        bin_c = np.zeros(nbins)
-        for i in range(nbins):
-            bin_c[i] = (bin_lims_[i] + bin_lims_[i+1])/2.0
-        bin_c = dtype(bin_c) #convert to right data type
-        #bin_c = [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95] #bin centers array example for nbins = 10
-        
-        #print(bin_lims_) #to check before proceeding
-        #print(bin_lims_.shape)
-        #time.sleep(5)
-        #print(bin_c)
-        #print(bin_c.shape)
-        #time.sleep(5)
 
         total_obs = np.zeros((nbins, nbins)) #creates nbins x nbins array of 0s for holding the number of tasks that fall into each cell
         total_successes = np.zeros((nbins, nbins)) #creates nbins x nbins array of 0s for the number of human successes in each cell
@@ -273,8 +258,8 @@ if __name__ == "__main__":
                 #print("IN LOOP ",model.pre_can_l[j],model.pre_can_u[j])
                 if(model.pre_can_l[j] > model.pre_can_u[j]): #if the lower bound is greater than the upper bound
                     buf = model.pre_can_l[j] #switch the l_1 and u_1 values
-                    model.pre_can_l[j] = model.pre_can_u[j]
-                    model.pre_can_u[j] = buf
+                    model.pre_can_l[j].data = model.pre_can_u[j]
+                    model.pre_can_u[j].data = buf
                     print("l and u switched in capability ", j)
 
                 l_sigm = model.sigm(model.pre_can_l) #convert to [0,1] range
@@ -442,7 +427,7 @@ if __name__ == "__main__":
                 #compute current loss and see if it is less than the loss tolerance.
                 #if it is, no need to run the optimizer.
                 #else, run the optimizer.
-                ll = torch.mean( torch.pow( (model(bin_c, obs_probs_idxs) - obs_probs_vect), 2.0 ) ) #current loss
+                ll = torch.mean( torch.pow( (model(obs_probs_idxs) - obs_probs_vect), 2.0 ) ) #current loss
                 if ll.item() < loss_tolerance: #.item is just the way to extract the value from a torch tensor
                     print("loss is already below tolerance. Not running optimizer.")
                     task_number_stopping_early += [i]
@@ -491,10 +476,8 @@ if __name__ == "__main__":
 
                         def closure(): #closure function must be defined for pytorch
                             #this will calculate the gradients. this runs everytime.
-                            #diff1 = model(bin_c, obs_probs_idxs)
                             
-                            #diff = torch.tensor(model(bin_c, obs_probs_idxs) - obs_probs_vect, requires_grad=True)
-                            diff = model(bin_c, obs_probs_idxs) - obs_probs_vect #the diff between trust estimated from artificial trust model and trust approximation
+                            diff = model(obs_probs_idxs) - obs_probs_vect #the diff between trust estimated from artificial trust model and trust approximation
                             #print("model diff = ", diff1)
                             #print("obs_probs_vect = ", obs_probs_vect)
                             #print("diff = ", diff)
@@ -525,7 +508,7 @@ if __name__ == "__main__":
 
                         l = model.sigm(model.pre_can_l) #convert back to correct range [0,1]
                         u = model.sigm(model.pre_can_u)
-                        ll = torch.mean( torch.pow( (model(bin_c, obs_probs_idxs) - obs_probs_vect), 2.0 ) )
+                        ll = torch.mean( torch.pow( (model(obs_probs_idxs) - obs_probs_vect), 2.0 ) )
 
                         #model(bin_c,obs_probs_idxs) calls the model's forward function
                         #for each bin, it is the trust value as given by the model
