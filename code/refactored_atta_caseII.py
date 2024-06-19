@@ -64,11 +64,11 @@ class RobotTrustModel(torch.nn.Module):
         # self.pre_will_u = Parameter(dtype( 10.0 * np.ones(1)), requires_grad=True)
 
 
-    def forward(self, bin_centers, obs_probs_idxs):
+    def forward(self, n_bins, obs_probs_idxs):
         #bin_centers and obs_probs_idxs are passed in
         
-        n_diffs = obs_probs_idxs.shape[0] #the number of [row,col] indexes (max is nbins x nbins (625))
-        trust = torch.zeros(n_diffs) #create a 1xn_diffs array of 0s
+        #n_diffs = obs_probs_idxs.shape[0] #the number of [row,col] indexes (max is nbins x nbins (625))
+        trust = torch.zeros(len(obs_probs_idxs)) #create a 1xn_diffs array of 0s
 
         for j in range(model.n_cap):
             if(self.pre_can_l[j] > self.pre_can_u[j]): #if the lower bound is greater than the upper bound
@@ -80,8 +80,12 @@ class RobotTrustModel(torch.nn.Module):
         u = self.sigm(self.pre_can_u)
         beta = self.pre_beta * self.pre_beta #want beta to be positive to compute trust using the artificial trust model
 
-        for i in range(n_diffs): #loop over the number of the [row,col] indexes (max is nbins x nbins (625))
-            trust[i] = self.compute_trust(l, u, beta, bin_centers[obs_probs_idxs[i]])
+        i = 0
+        for prob_idx_temp in obs_probs_idxs: #loop over the number of the [row,col] indexes (max is nbins x nbins (625))
+            # TODO may be optimized
+            prob_idxs_vec = np.array(list(prob_idx_temp))
+            trust[i] = self.compute_trust(l, u, beta, (prob_idxs_vec+0.5)*(1/nbins))
+            i += 1
             #computing the trust estimate for each cell based on the current lower and upper bounds (basically the 3d trust plot)
 
         if usecuda:
@@ -190,12 +194,13 @@ if __name__ == "__main__":
 
         total_obs = np.zeros((nbins, nbins)) #creates nbins x nbins array of 0s for holding the number of tasks that fall into each cell
         total_successes = np.zeros((nbins, nbins)) #creates nbins x nbins array of 0s for the number of human successes in each cell
+        obs_probs = np.zeros((nbins, nbins)) #creates nbins x nbins array of 0s for the number of human success probability in each cell
 
 
         num_tasks = 500 #Max = 500 based on .mat file. Change to the number of tasks you want to allocate.
 
-        total_num_tasks = [[num_tasks]]
-        obs_probs_idxs = [] #the row and col pairs for which there is an observed trust approximation [[row col][row col]...]
+        total_num_tasks = [[num_tasks]]        
+        obs_probs_idxs = set() # set of the row and col pairs for which there is an observed trust approximation [[row col][row col]...]
         obs_probs_vect = [] #the trust approximation corresponding to the row and col pair in obs_probs_idxs
         p = [] #2 x num_tasks array to hold all task requirements
         perfs = [] #1 x num_tasks array to hold team successes or failures 
@@ -408,38 +413,31 @@ if __name__ == "__main__":
 
             #update the nbins x nbins grid now for approximated trust
             if assigned == 1: #if the task was assigned to the human
-                for j in range(nbins): #iterate from 1 to nbins (nbins times) as the rows
-                    for k in range(nbins): #iterate from 1 to nbins (nbins times) as the columns
-                        if p[0][i] > bin_lims_[j] and p[0][i] <= bin_lims_[j+1]: #if ith task lambdabar1 requirement falls within j and j+1 th bin_lims_
-                            if p[1][i] > bin_lims_[k] and p[1][i] <= bin_lims_[k+1]: #if the ith task lambdabar2 requirement falls within k and k+1 th bin_lims_
-                                total_obs[j][k] = total_obs[j][k] + 1 #you have found the cell the task falls in so increase the number of observations for that cell
-                                if perfs[i] == 1: #if the ith task was a success
-                                    total_successes[j][k] = total_successes[j][k] + 1 #increase the number of successes for that cell
+                #for cap in range(n_cap): TODO adapt to more capabilities
 
-            obs_probs = np.divide(total_successes, total_obs) #divide the # of successes in each cell by the # of observations
+                j1 = round(p[0][i] * (nbins - 1))
+                k1 = round(p[1][i] * (nbins - 1))
 
+                # add indices to set of populated cells in trust matrix
+                indices_tupple = (j1, k1)
+                obs_probs_idxs.add(indices_tupple)
+                indices_list = list(indices_tupple)
 
+                #increment total observation matrix
+                total_obs[indices_list] = total_obs[indices_list] + 1 #you have found the cell the task falls in so increase the number of observations for that cell
+                if perfs[i] == 1: #if the ith task was a success
+                    total_successes[indices_list] = total_successes[indices_list] + 1 #increase the number of successes for that cell
 
-            #update the human's lower and upper bounds now
-            if assigned == 1: #if the task was assigned to the human
-                obs_probs_idxs = []
-                for j in range(obs_probs.shape[0]): #loop over the rows = nbins
-                    for k in range(obs_probs.shape[1]): #loop over the columns = nbins
-                        if np.isnan(obs_probs[j, k]) == False: #check to see if it is NaN (can happen if 0 tasks are executed in that cell)
-                            obs_probs_idxs += [[j, k]] #add the [row,col] as a valid index in which we have a trust estimate (tau hat)
-
-                obs_probs_idxs = np.array(obs_probs_idxs) #convert the valid indexes to a numpy array. it is now an array of 1x2 arrays [[x x][x x]...]
-
-
+                #update probabilities
+                obs_probs[indices_list] = total_successes[indices_list] / total_obs[indices_list] #divide the # of successes in each cell by the # of observations
                 obs_probs_vect = []
-                for j in range(obs_probs_idxs.shape[0]): #loop over the number of [row,col] indexes (max is nbins x nbins (625))
-                    obs_probs_vect += [obs_probs[obs_probs_idxs[j, 0], obs_probs_idxs[j, 1]]]
+                for prob_id in obs_probs_idxs: #loop over the number of [row,col] indexes (max is nbins x nbins (625))
+                    obs_probs_vect += [obs_probs[prob_id]]
                     #obs_probs_idxs[j,0] is the j th [row,col] row value and obs_probs_idxs[j,1] is the col value
                     #get the observed probability of each cell and store it in obs_probs_vect which is an array of values [x,x,...]
 
-                obs_probs = dtype(obs_probs) #convert to the right data type
+                #obs_probs = dtype(obs_probs) #convert to the right data type
                 obs_probs_vect = dtype(obs_probs_vect) #convert to the right data type
-
 
                 #compute current loss and see if it is less than the loss tolerance.
                 #if it is, no need to run the optimizer.
