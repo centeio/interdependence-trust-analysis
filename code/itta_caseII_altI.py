@@ -48,14 +48,14 @@ class RobotTrustModel(torch.nn.Module):
 
         self.can = Parameter(dtype(0.001 * np.ones(self.n_task_types)), requires_grad=True)
 
-        self.will = 1 
+        self.will = Parameter(dtype(10 * np.ones(1)), requires_grad=True)
 
 
     def forward(self):        
         trust = torch.zeros(self.n_task_types) #create a 1xn_diffs array of 0s
 
         c = self.sigm(self.can) #convert to [0,1] range
-        w = self.will
+        w = self.sigm(self.will)
 
         for t_i in range(len(trust)): #calculates current trust vector
             trust[t_i] = self.compute_trust(c, w, t_i)
@@ -141,7 +141,7 @@ if __name__ == "__main__":
         #fabricated capability values for the human
     
         human_c = np.array([0.80,0.20,0.90]) #size is n_cap
-        human_w = 1
+        human_w = 0.7
 
         robot_c = np.array([0.69,0.39,0.7])
         robot_w = 1
@@ -158,7 +158,7 @@ if __name__ == "__main__":
             #robotCost = 0
 
             c_sigm = model.sigm(model.can)
-            w_sigm = model.will
+            w_sigm = model.sigm(model.will)
 
             #compute trust in each agent now based on current belief in lower and upper bounds
             humantrust_i = model.compute_trust(c_sigm, w_sigm, task_type)
@@ -242,7 +242,7 @@ if __name__ == "__main__":
                     c = model.sigm(model.can) #convert back to correct range [0,1]
                     w = model.will
                     c_prog += [c.detach().numpy()] #get the value out of the tensor and add to the l_1 progression vector
-                    w_prog += [w]
+                    w_prog += [w.detach().numpy()]
 
                     tt += [0]
                     counter = np.append(counter, t_count)
@@ -302,9 +302,9 @@ if __name__ == "__main__":
                         #find the mean square error after subtracting the obs probabilities
 
                         c = model.sigm(model.can) #convert back to correct range [0,1]
-                        w = model.will
+                        w = model.sigm(model.will)
                         c_prog += [c.detach().numpy()] #get the value out of the tensor and add to the l_1 progression vector
-                        w_prog += [w]
+                        w_prog += [w.detach().numpy()]
 
 
                         tt += [t]
