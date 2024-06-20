@@ -178,7 +178,7 @@ if __name__ == "__main__":
         t_count = 0 #value to append to the counter
         counter = [] #giant linspace array [0,1,2,...] for every time Adam is run in total or passed because loss is already within tolerance
 
-        nbins = 10
+        nbins = 25
 
         total_obs = np.zeros((nbins, nbins)) #creates nbins x nbins array of 0s for holding the number of tasks that fall into each cell
         total_successes = np.zeros((nbins, nbins)) #creates nbins x nbins array of 0s for the number of human successes in each cell
@@ -222,6 +222,8 @@ if __name__ == "__main__":
         #human_u2 = 0.76    
         human_l = np.array([0.54,0.74]) #size is n_cap
         human_u = np.array([0.56,0.76])
+        #human_l = np.array([0.26,0.60]) #size is n_cap
+        #human_u = np.array([0.28,0.62])
 
         human_w = 1
 
@@ -321,7 +323,7 @@ if __name__ == "__main__":
             #assign the task now
             assigned = -1 #to indicate the task is not assigned yet
             Ediff = abs(Ehuman - Erobot)
-            alpha_tolerance = 0.0 #to help balance the distribution of tasks assigned to each agent
+            alpha_tolerance = 0 #to help balance the distribution of tasks assigned to each agent
             if Ediff <= alpha_tolerance:
                 tie_p = np.append(tie_p, p[:,i])
                 tie_num_tasks = tie_num_tasks + 1 #the number of tasks that were initially tied
@@ -434,7 +436,7 @@ if __name__ == "__main__":
                 #compute current loss and see if it is less than the loss tolerance.
                 #if it is, no need to run the optimizer.
                 #else, run the optimizer.
-                ll = torch.mean( torch.pow( (model(obs_probs_idxs) - obs_probs_vect), 2.0 ) ) #current loss
+                ll = torch.mean(torch.pow((model(obs_probs_idxs) - obs_probs_vect), 2.0 ) ) #current loss
                 if ll.item() < loss_tolerance: #.item is just the way to extract the value from a torch tensor
                     print("loss is already below tolerance. Not running optimizer.")
                     task_number_stopping_early += [i]
@@ -494,7 +496,7 @@ if __name__ == "__main__":
 
                             # loss = torch.tensor(torch.mean( torch.pow(diff, 2.0) ), requires_grad=True) #loss needs to be defined in pytorch
                             
-                            loss = torch.mean( torch.pow(diff, 2.0) ) #calculate the current loss
+                            loss = torch.mean(torch.pow(diff, 2.0) ) #calculate the current loss
                             #loss.retain_grad() #Something to try if current implementation doesnt work
                             #loss = torch.mean( torch.pow( (model(bin_c, obs_probs_idxs) - obs_probs_vect), 2.0 ) )
                             #print("loss = ", loss)

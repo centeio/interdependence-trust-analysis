@@ -69,12 +69,14 @@ class RobotTrustModel(torch.nn.Module):
         
         #n_diffs = obs_probs_idxs.shape[0] #the number of [row,col] indexes (max is nbins x nbins (625))
         trust = torch.zeros(len(obs_probs_idxs)) #create a 1xn_diffs array of 0s
+       
+        #with torch.no_grad():
+        #for j in range(model.n_cap):
+        #    if(self.pre_can_l[j] > self.pre_can_u[j]): #if the lower bound is greater than the upper bound
+        #        buf = self.pre_can_l[j] #switch the l_1 and u_1 values
+        #        self.pre_can_l[j].data = self.pre_can_u[j]
+        #        self.pre_can_u[j].data = buf
 
-        for j in range(model.n_cap):
-            if(self.pre_can_l[j] > self.pre_can_u[j]): #if the lower bound is greater than the upper bound
-                buf = self.pre_can_l[j] #switch the l_1 and u_1 values
-                self.pre_can_l[j].data = self.pre_can_u[j]
-                self.pre_can_u[j].data = buf
 
         l = self.sigm(self.pre_can_l) #convert to [0,1] range
         u = self.sigm(self.pre_can_u)
@@ -84,7 +86,8 @@ class RobotTrustModel(torch.nn.Module):
         for prob_idx_temp in obs_probs_idxs: #loop over the number of the [row,col] indexes (max is nbins x nbins (625))
             # TODO may be optimized
             prob_idxs_vec = np.array(list(prob_idx_temp))
-            trust[i] = self.compute_trust(l, u, beta, (prob_idxs_vec+0.5)*(1/nbins))
+            prob_temp = (prob_idxs_vec + 0.5)*(1/nbins)
+            trust[i] = self.compute_trust(l, u, beta, prob_temp)
             i += 1
             #computing the trust estimate for each cell based on the current lower and upper bounds (basically the 3d trust plot)
 
@@ -99,8 +102,12 @@ class RobotTrustModel(torch.nn.Module):
         trust = 1
 
         for i in range(self.n_cap):
-            l = l_vec[i]
-            u = u_vec[i]
+            if l_vec[i] > u_vec[i]:
+                l = u_vec[i]
+                u = l_vec[i]
+            else:
+                l = l_vec[i]
+                u = u_vec[i]
             b = b_vec[i]
             p = p_vec[i]
 
@@ -130,7 +137,7 @@ class RobotTrustModel(torch.nn.Module):
         return torch.div(1,torch.add(1,torch.exp(-x)))
 
     def sigmoid(self, lambdabar, agent_c):
-        #takes in task requirement for one dimension and the agent's actual capability for that dimension
+        #takes in task requirements and the agent's actual capability
         #calculates true trust to determine the stochastic task outcome
 
         #if lambdabar == agent_c, the sigmoid output is 0.5
@@ -175,7 +182,7 @@ if __name__ == "__main__":
         counter = [] #giant linspace array [0,1,2,...] for every time Adam is run in total or passed because loss is already within tolerance
 
         
-        nbins = 10
+        nbins = 25
 
         total_obs = np.zeros((nbins, nbins)) #creates nbins x nbins array of 0s for holding the number of tasks that fall into each cell
         total_successes = np.zeros((nbins, nbins)) #creates nbins x nbins array of 0s for the number of human successes in each cell
@@ -220,6 +227,9 @@ if __name__ == "__main__":
         human_l = np.array([0.54,0.74]) #size is n_cap
         human_u = np.array([0.56,0.76])
 
+        #human_l = np.array([0.44,0.95]) #size is n_cap
+        #human_u = np.array([0.46,0.97])
+
         human_beta = np.array([1000,1000]) #remember beta does not matter as long as it is positive
 
         #fabricated capability values for the robot
@@ -256,19 +266,21 @@ if __name__ == "__main__":
 
             for j in range(model.n_cap):
                 #print("IN LOOP ",model.pre_can_l[j],model.pre_can_u[j])
-                if(model.pre_can_l[j] > model.pre_can_u[j]): #if the lower bound is greater than the upper bound
-                    buf = model.pre_can_l[j] #switch the l_1 and u_1 values
-                    model.pre_can_l[j].data = model.pre_can_u[j]
-                    model.pre_can_u[j].data = buf
-                    print("l and u switched in capability ", j)
-
-                l_sigm = model.sigm(model.pre_can_l) #convert to [0,1] range
-                u_sigm = model.sigm(model.pre_can_u)
-                beta = model.pre_beta * model.pre_beta #keep it positive       
+                #if(model.pre_can_l[j] > model.pre_can_u[j]): #if the lower bound is greater than the upper bound
+                #    buf = model.pre_can_l[j] #switch the l_1 and u_1 values
+                #    model.pre_can_l[j].data = model.pre_can_u[j]
+                #    model.pre_can_u[j].data = buf
+                #    print("l and u switched in capability ", j)
 
                 reward = reward + p[j][i]
                 humanCost = humanCost + p[j][i]
                 robotCost = robotCost + p[j][i]
+
+            l_sigm = model.sigm(model.pre_can_l) #convert to [0,1] range
+            u_sigm = model.sigm(model.pre_can_u)
+            beta = model.pre_beta * model.pre_beta #keep it positive       
+
+
 
 
             #compute trust in each agent now based on current belief in lower and upper bounds
@@ -354,7 +366,8 @@ if __name__ == "__main__":
             human_outcome_prob = np.prod(model.sigmoid(p[:,i], human_c))
             robot_outcome_prob = np.prod(model.sigmoid(p[:,i], robot_c))
 
-            print(human_outcome_prob)
+
+            print("human_outcome_prob", human_outcome_prob)
 
             if assigned == 1: #if the task was assigned to the human
 
@@ -362,9 +375,11 @@ if __name__ == "__main__":
                     perf_i = 1 #success on the ith task
                     human_successes = np.hstack((human_successes, col_i))
                     total_reward = total_reward + (reward - humanCost)
+                    print("SUCCESS")
                 else: #already failure by default on the ith task
                     human_failures = np.hstack((human_failures, col_i))
                     total_reward = total_reward - humanCost
+                    print("FAIL")
                 human_perfs = np.append(human_perfs, perf_i)
                 max_total_reward = max_total_reward + (reward - humanCost)
             

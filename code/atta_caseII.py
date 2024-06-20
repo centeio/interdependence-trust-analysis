@@ -219,10 +219,10 @@ if __name__ == "__main__":
         max_total_reward = 0 #the max total reward if every task was a success
 
         #fabricated capability values for the human
-        human_l1 = 0.54
-        human_u1 = 0.56
-        human_l2 = 0.74
-        human_u2 = 0.76    
+        human_l1 = 0.44# 0.54
+        human_u1 = 0.46#0.56
+        human_l2 = 0.95#0.74
+        human_u2 = 0.97#0.76    
         human_beta1 = 1000 #remember beta does not matter as long as it is positive
         human_beta2 = human_beta1
 
